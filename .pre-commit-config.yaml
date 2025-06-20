@@ -13,25 +13,10 @@ repos:
         args: [--fix=lf]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.13
+    rev: v0.12.0
     hooks:
       - id: ruff-check
       - id: ruff-format
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.16.1
-    hooks:
-      - id: mypy
-
-  - repo: local
-    hooks:
-      - id: export-requirements
-        name: Export requirements.txt from poetry
-        entry: bash -c 'poetry export --without-hashes -f requirements.txt -o requirements.txt && git add requirements.txt'
-        language: system
-        stages: [commit]
-        always_run: true
-
 
   - repo: https://github.com/pre-commit/pygrep-hooks
     rev: v1.10.0

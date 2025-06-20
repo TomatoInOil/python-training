@@ -1,5 +1,4 @@
 import asyncio
-import os
 from asyncio import Queue, Semaphore
 from pathlib import Path
 
@@ -20,21 +19,16 @@ async def add_url_to_queue(queue: Queue, urls_file_path: Path):
 
 
 async def process_urls(
-    queue: Queue, results_dir_path: Path, session: ClientSession, semaphore: Semaphore
+    queue: Queue, output_file_path: Path, session: ClientSession, semaphore: Semaphore
 ):
     """Запускает обработку URL-ов."""
     tasks = []
-    output_dir_path = results_dir_path / "output_files"
-    os.makedirs(output_dir_path, exist_ok=True)
-    results_jsonl_path = results_dir_path / "results.jsonl"
     while True:
         url = await queue.get()
         if url is None:
             break
         task = asyncio.create_task(
-            process_single_url_with_retry(
-                url, results_jsonl_path, output_dir_path, session, semaphore
-            )
+            process_single_url_with_retry(url, output_file_path, session, semaphore)
         )
         tasks.append(task)
     await asyncio.gather(*tasks)

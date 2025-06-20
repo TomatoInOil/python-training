@@ -1,90 +1,96 @@
 import asyncio
-import base64
 import hashlib
 import json
 from asyncio import Semaphore
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 
 from aiofile import async_open
 from aiohttp import ClientSession
 
 MAX_RETRIES = 3
 RETRY_DELAY = 5
+CHUNK_SIZE = 1024 * 1024 * 100
+
+process_pool = ProcessPoolExecutor(max_workers=2)
 
 
 async def process_single_url_with_retry(
-    url: str, results_jsonl_path: Path, output_dir_path: Path, session: ClientSession, semaphore: Semaphore
+    url: str,
+    output_file_path: Path,
+    session: ClientSession,
+    semaphore: Semaphore,
 ):
     """Обрабатывает один URL с retry-логикой."""
     for attempt in range(MAX_RETRIES):
         try:
             async with semaphore:
-                output_path = output_dir_path / f"{hashlib.sha256(url.encode()).hexdigest()}.json"
-                await stream_url_to_file(session, url, output_path, results_jsonl_path)
+                await stream_url_to_file(session, url, output_file_path)
                 return
         except Exception as e:
             if attempt == MAX_RETRIES - 1:
-                error_path = output_dir_path / f"error_{hashlib.sha256(url.encode()).hexdigest()}.json"
-                await save_error_file(url, error_path, str(e))
+                await save_error_file(url, output_file_path, str(e))
                 return
             retry_delay = RETRY_DELAY * (2**attempt)
             await asyncio.sleep(retry_delay)
 
 
-async def stream_url_to_file(session: ClientSession, url: str, output_file_path: Path, results_jsonl_path: Path):
+async def stream_url_to_file(session: ClientSession, url: str, output_file_path: Path):
     """Определяет тип контента и записывает его в файл."""
     async with session.get(url) as resp:
-        content_type = resp.headers.get("Content-Type", "").lower()
-        content_disposition = resp.headers.get("Content-Disposition", "")
-        async with async_open(output_file_path, "w") as file:
+        text = None
+        temp_file_path = (
+            output_file_path.parent
+            / f"temp_{hashlib.sha256(url.encode()).hexdigest()}.bin"
+        )
+        if int(resp.headers.get("content-length", 0)) > CHUNK_SIZE:
+            async with async_open(
+                temp_file_path,
+                "ab",
+            ) as file:
+                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                    await file.write(chunk)
+        else:
+            text = await resp.text()
 
+        loop = asyncio.get_running_loop()
+        if text is None:
+            parsed_content = await loop.run_in_executor(
+                process_pool, parse_large_json, temp_file_path
+            )
+            temp_file_path.unlink()
+        else:
+            parsed_content = await loop.run_in_executor(process_pool, json.loads, text)
+        async with async_open(output_file_path, "a") as file:
             await file.write(
-                '{"url": '
-                + json.dumps(url)
-                + ', "status_code": '
-                + str(resp.status)
-                + ', "content_type": '
-                + json.dumps(content_type)
-                + ', "content_disposition": '
-                + json.dumps(content_disposition)
-                + ', "content": '
+                f"{
+                    json.dumps(
+                        {
+                            'url': url,
+                            'status_code': resp.status,
+                            'content': parsed_content,
+                        }
+                    )
+                }\n"
             )
 
-            if "application/json" in content_type:
-                async for chunk in resp.content.iter_chunked(10 * 1024 * 1024):
-                    await file.write(chunk.decode("utf-8", errors="replace"))
-                await file.write("}")
 
-            elif "text/" in content_type:
-                await file.write('"')
-                async for chunk in resp.content.iter_chunked(10 * 1024 * 1024):
-                    await file.write(chunk.decode("utf-8", errors="replace"))
-                await file.write('"}')
-            else:
-                await file.write('"')
-                await stream_binary_to_base64(resp, file)
-                await file.write('"}')
-    async with async_open(results_jsonl_path, "a+") as file:
-        line_data = {"url": url, "output_file_path": str(output_file_path)}
-        await file.write(f"{json.dumps(line_data)}\n")
+def parse_large_json(file_path: Path) -> dict:
+    with open(file_path, "r") as f:
+        return json.loads(f.read())
 
 
-async def stream_binary_to_base64(resp, file):
-    """Кодирует бинарные данные в Base64 и пишет в файл."""
-    b64_encoder = base64.b64encode
-    async for chunk in resp.content.iter_chunked(10 * 1024 * 1024):
-        await file.write(b64_encoder(chunk).decode("utf-8"))
-
-
-async def save_error_file(url: str, error_path: Path, error: str):
+async def save_error_file(url: str, output_file_path: Path, error: str):
     """Сохраняет ошибку в файл."""
-    async with async_open(error_path, "w") as f:
+    async with async_open(output_file_path, "a") as f:
         await f.write(
-            json.dumps(
-                {
-                    "url": url,
-                    "status_code": 0,
-                    "error": error,
-                }
-            )
+            f"{
+                json.dumps(
+                    {
+                        'url': url,
+                        'status_code': 0,
+                        'error': error,
+                    }
+                )
+            }\n"
         )
